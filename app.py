@@ -583,9 +583,9 @@ if option == "Upload pic/video":
                             st.markdown(f"**File: {uploaded_file.name}**")
                             col1, col2 = st.columns([1, 1])
                             with col1:
-                                st.image(img, caption="Picture", use_container_width=True)
+                                st.image(img, caption="Picture", use_column_width=True)
                             with col2:
-                                st.image(annotated_img, caption="Result", use_container_width=True)
+                                st.image(annotated_img, caption="Result", use_column_width=True)
                             if results.boxes:
                                 for box in results.boxes:
                                     cls = int(box.cls)
