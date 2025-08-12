@@ -84,7 +84,7 @@ def load_users():
     return {}
 
 def save_users(users_dict):
-    with open(USER_DATA_FILE, "wb") as f):
+    with open(USER_DATA_FILE, "wb") as f:
         pickle.dump(users_dict, f)
 
 def get_coordinates(location):
