@@ -26,6 +26,8 @@ def load_model():
     return model
 
 model = load_model()
+model.fuse()
+model.eval()
 
 disposal_suggestions = {
     "Dry Waste": "Please place this in the dry waste bin (usually blue or gray).",
@@ -468,7 +470,7 @@ if not st.session_state.user:
                         st.session_state.user = username
                         st.session_state.points = users[username]["points"]
                         st.success(f"Welcome back, {username}!")
-                        st.rerun()
+                        # st.rerun() removed to reduce rerun storms during camera streaming
                     else:
                         st.error("Incorrect password.")
                 else:
@@ -477,7 +479,7 @@ if not st.session_state.user:
                     st.session_state.user = username
                     st.session_state.points = 0
                     st.success(f"Registered and logged in as {username}!")
-                    st.rerun()
+                    # st.rerun() removed to reduce rerun storms during camera streaming
             else:
                 st.error("Please provide username and password.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -496,7 +498,7 @@ else:
             del st.session_state.current_detections
         st.session_state.uploader_key += 1
         st.success("Logged out.")
-        st.rerun()
+        # st.rerun() removed to reduce rerun storms during camera streaming
     # Display leaderboard
     with st.container():
         st.markdown('<div class="leaderboard-container">', unsafe_allow_html=True)
@@ -518,210 +520,62 @@ def is_battery_related(detections):
             return True
     return False
 
+
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.detections_queue = Queue(maxsize=1)  # Limit queue size to 1 to always get the latest frame detections and reduce backlog
+        # Single-slot queue to publish latest unique detections to the UI
+        self.detections_queue = Queue(maxsize=1)
+        # Cache last annotated frame to display even when skipping inference
+        self._last_annotated = None
+        self._last_detections = []
+        self._frame_idx = 0
+        self._last_infer_ts = 0.0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
-        with torch.no_grad():  # Disable gradients for faster inference
-            results = model(img, imgsz=320, conf=0.3)[0]  # Increase conf threshold slightly for faster processing by reducing post-processing
-        annotated_img = results.plot()
-        for box in results.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            label = model.names[int(box.cls)]
-            waste_type = get_waste_type(label)
-            suggestion = disposal_suggestions.get(waste_type, "Unknown")
-            cv2.putText(annotated_img, suggestion, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        unique_detections = set(model.names[int(box.cls)] for box in results.boxes)
-        if unique_detections:
-            try:
-                self.detections_queue.put_nowait(list(unique_detections))  # Non-blocking put, overwrite if full
-            except:
-                pass  # If queue full, skip to avoid delay
-        else:
-            try:
-                self.detections_queue.put_nowait([])
-            except:
-                pass
-        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
 
-if option == "Upload pic/video":
-    st.subheader("📤 Upload your file here")
-    uploaded_files = st.file_uploader("Select Pics (Maximum 10 pics) or Video", type=["jpg", "jpeg", "png", "mp4"], accept_multiple_files=True, help="Multiple Pictures Supported", key=f"file_uploader_{st.session_state.uploader_key}")
-    if uploaded_files:
-        names = [f.name for f in uploaded_files]
-        if "last_uploaded" not in st.session_state or st.session_state.last_uploaded != names:
-            if "points_added" in st.session_state:
-                del st.session_state.points_added
-            st.session_state.last_uploaded = names
-        if len(uploaded_files) > 10:
-            st.error("❌ Maximum 10 pics")
-        else:
-            all_detections = []
-            all_unique_types = set()
-            has_battery = False
-            progress_bar = st.progress(0)
-            total_files = len(uploaded_files)
-            with st.spinner("🔄 Processing..."):
+        # ---- Inference throttling ----
+        # Process at most ~8 inferences/sec and only every 2 frames
+        self._frame_idx += 1
+        do_infer = (self._frame_idx % 2 == 0)
+
+        import time
+        now = time.time()
+        if now - self._last_infer_ts < 0.12:  # ~8 FPS cap
+            do_infer = False
+
+        if do_infer:
+            self._last_infer_ts = now
+            with torch.no_grad():
+                # Smaller imgsz speeds up CPU inference; tweakable in sidebar if needed
+                results = model(img, imgsz=320, conf=0.35)[0]
+
+            annotated = results.plot()
+
+            # Build a compact set of unique detection labels for UI
+            uniq = set()
+            for box in results.boxes:
+                lbl = model.names[int(box.cls)]
+                uniq.add(lbl)
+
+                # Hint text overlay for disposal guidance (cheap to keep)
                 try:
-                    for idx, uploaded_file in enumerate(uploaded_files, 1):
-                        progress_bar.progress(idx / total_files)
-                        file_type = uploaded_file.type
-                        if "image" in file_type:
-                            img = np.frombuffer(uploaded_file.read(), np.uint8)
-                            img = cv2.imdecode(img, cv2.IMREAD_COLOR)
-                            with torch.no_grad():
-                                results = model(img, imgsz=320, conf=0.3)[0]  # Optimized inference
-                            annotated_img = results.plot()
-                            for box in results.boxes:
-                                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                                label = model.names[int(box.cls)]
-                                waste_type = get_waste_type(label)
-                                suggestion = disposal_suggestions.get(waste_type, "Unknown")
-                                cv2.putText(annotated_img, suggestion, (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                            st.markdown(f"**File: {uploaded_file.name}**")
-                            col1, col2 = st.columns([1, 1])
-                            with col1:
-                                st.image(img, caption="Picture", use_column_width=True)
-                            with col2:
-                                st.image(annotated_img, caption="Result", use_column_width=True)
-                            if results.boxes:
-                                for box in results.boxes:
-                                    cls = int(box.cls)
-                                    conf = float(box.conf)
-                                    label = model.names[cls]
-                                    waste_type = get_waste_type(label)
-                                    all_unique_types.add(waste_type)
-                                    all_detections.append((label, conf))
-                                    if any(b in label for b in battery_related_classes):
-                                        has_battery = True
-                        elif "video" in file_type:
-                            if len(uploaded_files) > 1:
-                                st.error("❌ You could only upload one video at a time")
-                                break
-                            temp_path = "temp_video.mp4"
-                            with open(temp_path, "wb") as f:
-                                f.write(uploaded_file.read())
-                            cap = cv2.VideoCapture(temp_path)
-                            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            st.write(f"Video Length: {frame_count / fps:.2f} secs")
-                            detections = []
-                            unique_types = set()
-                            step = max(1, frame_count // 10)
-                            for i in range(0, min(frame_count, 10 * step), step):
-                                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                                ret, frame = cap.read()
-                                if ret:
-                                    with torch.no_grad():
-                                        results = model(frame, imgsz=320, conf=0.3)[0]  # Optimized
-                                    if results.boxes:
-                                        for box in results.boxes:
-                                            cls = int(box.cls)
-                                            label = model.names[cls]
-                                            waste_type = get_waste_type(label)
-                                            unique_types.add(waste_type)
-                                            detections.append(label)
-                                            if any(b in label for b in battery_related_classes):
-                                                has_battery = True
-                            cap.release()
-                            st.video(temp_path)
-                            with results_container:
-                                if detections:
-                                    unique_detections = set(detections)
-                                    st.markdown('<span class="big-title">Garbage in the video:</span>', unsafe_allow_html=True)
-                                    for det in unique_detections:
-                                        st.write(f"- {det}")
-                                    st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                                    for waste_type in unique_types:
-                                        suggestion = disposal_suggestions.get(waste_type, "Unknown")
-                                        st.write(f"- {waste_type}: {suggestion}")
-                                    if has_battery:
-                                        display_battery_recycling_section(key_suffix="video")
-                                    if st.session_state.user and "points_added" not in st.session_state:
-                                        st.session_state.points_added = True
-                                        added_points = len(unique_detections)
-                                        users[st.session_state.user]["points"] += added_points
-                                        st.session_state.points = users[st.session_state.user]["points"]
-                                        save_users(users)
-                                        st.success(f"Points updated! You now have {st.session_state.points} points.")
-                                        st.rerun()
-                                else:
-                                    st.info("No garbage detected")
-                            continue
-                    if st.session_state.user and all_detections and "points_added" not in st.session_state:
-                        st.session_state.points_added = True
-                        users[st.session_state.user]["points"] += len(all_detections)
-                        st.session_state.points = users[st.session_state.user]["points"]
-                        save_users(users)
-                        st.success(f"Points updated! You now have {st.session_state.points} points.")
-                        st.rerun()
-                    with results_container:
-                        if all_detections:
-                            st.markdown('<span class="big-title">Garbage in all images:</span>', unsafe_allow_html=True)
-                            for label, conf in all_detections:
-                                st.write(f"- {label} (Confidence: {conf:.2f})")
-                            st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                            for waste_type in all_unique_types:
-                                suggestion = disposal_suggestions.get(waste_type, "Unknown")
-                                st.write(f"- {waste_type}: {suggestion}")
-                            if has_battery or is_battery_related(all_detections):
-                                display_battery_recycling_section(key_suffix="images")
-                        else:
-                            st.info("No garbage detected")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}. Please check file format.")
-elif option == "Use Camera":
-    st.subheader("Camera Detection")
-    st.info("Click 'Start' to detect")
-    ctx = webrtc_streamer(
-        key="webcam",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        video_processor_factory=VideoProcessor,
-        async_processing=True,
-    )
-    if not ctx.state.playing:
-        if "camera_started" in st.session_state:
-            del st.session_state.camera_started
-        if "points_added" in st.session_state:
-            del st.session_state.points_added
-        st.session_state.current_detections = []
-    if ctx.state.playing:
-        st.write("Detecting... (Click 'Stop' to quit)")
-        if "camera_started" not in st.session_state:
-            st.session_state.camera_started = True
-        if ctx.video_processor:
-            try:
-                unique_detections = ctx.video_processor.detections_queue.get(timeout=0.01)  # Short timeout to prevent blocking
-                st.session_state.current_detections = unique_detections
-            except Empty:
-                unique_detections = st.session_state.current_detections
-            with results_container:
-                if unique_detections:
-                    st.markdown('<span class="big-title">Detected Garbage:</span>', unsafe_allow_html=True)
-                    for det in sorted(unique_detections):
-                        st.write(f"- {det}")
-                    unique_types = set(get_waste_type(det) for det in unique_detections)
-                    st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                    for waste_type in sorted(unique_types):
-                        suggestion = disposal_suggestions.get(waste_type, "Unknown")
-                        st.write(f"- {waste_type}: {suggestion}")
-                    has_battery = any(any(b in det for b in battery_related_classes) for det in unique_detections)
-                    if has_battery:
-                        display_battery_recycling_section(key_suffix="camera")
-                else:
-                    st.info("No garbage detected")
-            if st.session_state.user and unique_detections and "points_added" not in st.session_state:
-                st.session_state.points_added = True
-                users[st.session_state.user]["points"] += len(unique_detections)
-                st.session_state.points = users[st.session_state.user]["points"]
-                save_users(users)
-                st.success(f"Points updated! You now have {st.session_state.points} points.")
-            time.sleep(0.03)  # Slightly reduced sleep for better responsiveness without overload
-            st.rerun()
-    else:
-        st.write("Ready, Click 'Start' to detect")
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    waste_type = get_waste_type(lbl)
+                    suggestion = disposal_suggestions.get(waste_type, "Unknown")
+                    cv2.putText(annotated, suggestion, (x1, max(y2 + 20, 0)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                except Exception:
+                    pass
 
-st.markdown('<div class="footer">© 2025 Garbage Detection System | Final Update: 2025-08-02 21:00:18</div>', unsafe_allow_html=True)
+            self._last_annotated = annotated
+            self._last_detections = sorted(list(uniq))
+
+            # Non-blocking publish to queue (drop if UI hasn't consumed the previous one)
+            try:
+                self.detections_queue.put_nowait(self._last_detections)
+            except Exception:
+                pass
+
+        # Return last annotated frame (or the raw image if none yet)
+        out = self._last_annotated if self._last_annotated is not None else img
+        return av.VideoFrame.from_ndarray(out, format="bgr24")
