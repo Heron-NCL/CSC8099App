@@ -1,3 +1,4 @@
+# app.py — Streamlit Community Cloud version
 import os
 os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
 os.environ.setdefault("OPENCV_FOR_THREAD_NUMBER", "1")
@@ -18,22 +19,20 @@ from queue import Queue, Empty
 from math import radians, sin, cos, sqrt, atan2
 from streamlit_autorefresh import st_autorefresh
 import time
-import streamlit.components.v1 as components  # for Google Maps iframe
+import streamlit.components.v1 as components
 
-# -------------------- Model loading (ONNX first) --------------------
+
 @st.cache_resource(show_spinner=True)
 def load_model():
-    # 1) allow override via secrets/env
+    
     model_path = st.secrets.get("MODEL_PATH", os.getenv("MODEL_PATH", "")).strip()
-    # 2) fallback search in repo
     if not model_path:
         for p in ["best.onnx", "best.pt", "models/best.onnx", "models/best.pt"]:
             if os.path.exists(p):
                 model_path = p
                 break
     if not model_path or not os.path.exists(model_path):
-        st.error("Model file not found. Please upload 'best.onnx' or 'best.pt' to the repo "
-                 "or set secrets MODEL_PATH to its path.")
+        st.error("Model file not found. Put 'best.onnx' or 'best.pt' in repo, or set secrets MODEL_PATH.")
         st.stop()
 
     model = YOLO(model_path)
@@ -49,7 +48,7 @@ def load_model():
     except Exception:
         pass
 
-    # warmup: avoid first-frame stall (works with both .onnx and .pt)
+    # WARMUP
     try:
         dummy = np.zeros((320, 320, 3), dtype=np.uint8)
         _ = model.predict(dummy, imgsz=320, conf=0.3, verbose=False)
@@ -59,7 +58,7 @@ def load_model():
 
 model = load_model()
 
-# -------------------- Business data --------------------
+
 disposal_suggestions = {
     "Dry Waste": "Please place this in the dry waste bin (usually blue or gray).",
     "Recyclable": "Please place this in the recyclable waste bin (usually green).",
@@ -203,8 +202,272 @@ def display_battery_recycling_section(key_suffix=""):
 
 st.markdown("""
 <style>
-.footer { text-align:center; padding:10px; }
-.big-title { font-size: 1.1rem; font-weight: 700; }
+.stApp {
+    padding: 20px;
+    font-family: Arial, sans-serif;
+    position: relative;
+    min-height: 100vh;
+}
+.stSidebar {
+    padding: 10px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+.st-expander {
+    border-radius: 5px;
+    padding: 10px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+.stButton>button {
+    background-color: #4CAF50;
+    color: white;
+    border-radius: 5px;
+    border: none;
+    padding: 10px 20px;
+    font-size: 16px;
+}
+.stButton>button:hover {
+    background-color: #45a049;
+}
+[data-testid="column"] {
+    padding: 10px;
+    box-sizing: border-box;
+}
+@media (max-width: 768px) {
+    [data-testid="column"] {
+        margin-bottom: 20px;
+    }
+    .row-widget.stHorizontal {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center;
+        display: flex !important;
+    }
+    .stVideo, .stImage {
+        width: 100% !important;
+    }
+    .stSidebar {
+        padding: 5px;
+    }
+    .stApp {
+        padding: 10px;
+    }
+    .leaderboard-container .row-widget.stHorizontal [data-testid="column"] {
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        max-width: 33.33% !important;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 5px !important;
+        font-size: 0.8em !important;
+    }
+    .leaderboard-container .row-widget.stHorizontal {
+        display: flex !important;
+        flex-direction: row !important;
+        justify-content: space-between !important;
+        align-items: center !important;
+        width: 100% !important;
+        flex-wrap: nowrap !important;
+    }
+    .leaderboard-container {
+        width: 100% !important;
+        overflow-x: auto !important;
+    }
+    .leaderboard-container [data-testid="stHorizontalBlock"] {
+        min-width: 300px !important;
+    }
+}
+.stAlert {
+    border-radius: 5px;
+    padding: 10px;
+}
+.stProgress > div > div > div > div {
+    background-color: #4CAF50;
+}
+.login-container, .location-container, .leaderboard-container {
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.user-info {
+    font-size: 18px;
+    font-weight: bold;
+    color: #4CAF50;
+}
+.footer {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    text-align: center;
+    padding: 10px;
+}
+.big-title {
+    font-size: 1.5em;
+    font-weight: bold;
+}
+.stTextInput > div > div > input {
+    border-radius: 4px;
+    padding: 8px;
+}
+.stFileUploader > div {
+    border-radius: 4px;
+    padding: 8px;
+}
+.leaderboard-container {
+    width: auto;
+    max-width: 600px;
+    margin: 0 auto;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+.leaderboard-header, .leaderboard-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 12px 15px;
+}
+.leaderboard-header {
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.leaderboard-header span, .leaderboard-row span {
+    flex: 1;
+    text-align: center;
+}
+.leaderboard-row span:first-child, .leaderboard-row span:last-child {
+    flex: 0.5;
+}
+.leaderboard-row:hover {
+    transition: background-color 0.2s ease;
+}
+@media (max-width: 768px) {
+    .leaderboard-container {
+        max-width: 100% !important;
+        font-size: 0.9em !important;
+    }
+    .leaderboard-header, .leaderboard-row {
+        padding: 10px 12px;
+    }
+}
+html[theme="light"] {
+    .stApp {
+        background-color: #f0f2f6;
+    }
+    .stSidebar {
+        background-color: #ffffff;
+    }
+    .st-expander {
+        border: 1px solid #e0e0e0;
+        background-color: #ffffff;
+    }
+    .stAlert {
+        background-color: transparent;
+    }
+    .login-container, .leaderboard-container {
+        border: 1px solid #ddd;
+        background-color: #fff;
+    }
+    .footer {
+        background-color: #f0f2f6;
+        color: black;
+    }
+    .stTextInput > div > div > input {
+        background-color: #f9f9f9;
+        border: 1px solid #ccc;
+    }
+    .stFileUploader > div {
+        background-color: #f9f9f9;
+        border: 1px solid #ccc;
+    }
+    p, div, span, h1, h2, h3, h4, h5, h6, .stMarkdown, [data-testid="stMarkdownContainer"], [data-testid="stExpanderSummary"], [data-testid="stExpanderDetails"], [data-testid="stText"], [data-testid="caption"], .stAlert > div, .stInfo > div, .stWarning > div, .stError > div, .stSuccess > div {
+        color: #000000;
+    }
+    [data-testid="stHorizontalBlock"], [data-testid="column"], .row-widget.stHorizontal, [data-testid="stSidebar"] > div:first-child {
+        background-color: transparent;
+    }
+    .leaderboard-header {
+        background-color: #f8f9fa;
+        color: #333333;
+        border-bottom: 2px solid #dee2e6;
+    }
+    .leaderboard-row {
+        border-bottom: 1px solid #dee2e6;
+        color: #555555;
+    }
+    .leaderboard-row:nth-child(even) {
+        background-color: #f8f9fa;
+    }
+    .leaderboard-row:hover {
+        background-color: #e9ecef;
+    }
+    .leaderboard-row:last-child {
+        border-bottom: none;
+    }
+}
+html[theme="dark"] {
+    .stApp {
+        background-color: #121212;
+    }
+    .stSidebar {
+        background-color: #1f1f1f;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .st-expander {
+        border: 1px solid #444444;
+        background-color: #1f1f1f;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .stAlert {
+        background-color: #333333;
+    }
+    .login-container, .leaderboard-container {
+        border: 1px solid #444444;
+        background-color: #1f1f1f;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .footer {
+        background-color: #121212;
+        color: #ffffff;
+    }
+    .stTextInput > div > div > input {
+        background-color: #333333;
+        border: 1px solid #555555;
+        color: #ffffff;
+    }
+    .stFileUploader > div {
+        background-color: #333333;
+        border: 1px solid #555555;
+        color: #ffffff;
+    }
+    p, div, span, h1, h2, h3, h4, h5, h6, .stMarkdown, [data-testid="stMarkdownContainer"], [data-testid="stExpanderSummary"], [data-testid="stExpanderDetails"], [data-testid="stText"], [data-testid="caption"], .stAlert > div, .stInfo > div, .stWarning > div, .stError > div, .stSuccess > div {
+        color: #ffffff;
+    }
+    [data-testid="stHorizontalBlock"], [data-testid="column"], .row-widget.stHorizontal, [data-testid="stSidebar"] > div:first-child {
+        background-color: #1f1f1f;
+    }
+    .leaderboard-header {
+        background-color: #2c2c2c;
+        color: #ffffff;
+        border-bottom: 2px solid #3a3a3a;
+    }
+    .leaderboard-row {
+        border-bottom: 1px solid #3a3a3a;
+        color: #dddddd;
+    }
+    .leaderboard-row:nth-child(even) {
+        background-color: #242424;
+    }
+    .leaderboard-row:hover {
+        background-color: #303030;
+    }
+    .leaderboard-row:last-child {
+        border-bottom: none;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -225,9 +488,14 @@ if "selected_option" not in st.session_state:
 if "points_added" not in st.session_state:
     st.session_state.points_added = False
 
+option = st.sidebar.radio("Function", ("Upload pic/video", "Use Camera"),
+                          format_func=lambda x: f"🌟 {x}", key="selected_option")
+results_container = st.expander("📋 Result:", expanded=True)
+
 
 if not st.session_state.user:
     with st.container():
+        st.markdown('<div class="login-container">', unsafe_allow_html=True)
         col_login1, col_login2 = st.columns(2)
         with col_login1:
             username = st.text_input("Username (optional)", placeholder="Enter your username")
@@ -252,23 +520,31 @@ if not st.session_state.user:
                     st.rerun()
             else:
                 st.error("Please provide username and password.")
+        st.markdown('</div>', unsafe_allow_html=True)
 else:
-    st.markdown(f'**Logged in as:** {st.session_state.user}  |  **Points:** {st.session_state.points}')
+    st.markdown(f'<p class="user-info">Logged in as: {st.session_state.user} | Points: {st.session_state.points}</p>', unsafe_allow_html=True)
     if st.button("Logout"):
-        st.session_state.clear()
+        st.session_state.user = None
+        st.session_state.points = 0
+        st.session_state.points_added = False
+        if "last_uploaded" in st.session_state: del st.session_state.last_uploaded
+        if "camera_started" in st.session_state: del st.session_state.camera_started
+        st.session_state.current_detections = []
+        st.session_state.uploader_key += 1
         st.success("Logged out.")
         st.rerun()
+
     
     with st.container():
+        st.markdown('<div class="leaderboard-container">', unsafe_allow_html=True)
         sorted_users = sorted(users.items(), key=lambda x: x[1]['points'], reverse=True)[:10]
         st.write("Leaderboard (Top 10):")
+        leaderboard_html = '<div class="leaderboard-header"><span>Rank</span><span>User</span><span>Points</span></div>'
         for rank, (user, data) in enumerate(sorted_users, 1):
-            st.write(f"{rank}. {user} - {data['points']}")
+            leaderboard_html += f'<div class="leaderboard-row"><span>{rank}</span><span>{user}</span><span>{data["points"]}</span></div>'
+        st.markdown(leaderboard_html, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-
-option = st.sidebar.radio("Function", ("Upload pic/video", "Use Camera"),
-                          format_func=lambda x: f"🌟 {x}", key="selected_option")
-results_container = st.expander("📋 Result:", expanded=True)
 
 def is_battery_related(detections):
     for label, _ in detections:
@@ -279,16 +555,17 @@ def is_battery_related(detections):
 
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.detections_queue = Queue(maxsize=1)  # latest-only, avoid backlog
+        self.detections_queue = Queue(maxsize=1)
         self._last_annotated = None
         self._frame_idx = 0
         self._last_infer_ts = 0.0
+        self._imgsz = 320
+        self._conf = 0.35
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         self._frame_idx += 1
 
-        
         do_infer = (self._frame_idx % 2 == 0)
         now = time.time()
         if now - self._last_infer_ts < 0.12:
@@ -298,7 +575,7 @@ class VideoProcessor(VideoProcessorBase):
             try:
                 self._last_infer_ts = now
                 with torch.no_grad():
-                    results = model(img, imgsz=320, conf=0.35, verbose=False)[0]
+                    results = model(img, imgsz=self._imgsz, conf=self._conf, verbose=False)[0]
                 annotated = results.plot()
 
                 uniq = set()
@@ -319,14 +596,13 @@ class VideoProcessor(VideoProcessorBase):
                 try:
                     self.detections_queue.put_nowait(sorted(list(uniq)))
                 except Exception:
-                    
                     try:
                         _ = self.detections_queue.get_nowait()
                         self.detections_queue.put_nowait(sorted(list(uniq)))
                     except Exception:
                         pass
             except Exception:
-                self._last_annotated = img  
+                self._last_annotated = img
 
         out = self._last_annotated if self._last_annotated is not None else img
         return av.VideoFrame.from_ndarray(out, format="bgr24")
@@ -339,8 +615,8 @@ if option == "Upload pic/video":
                                       accept_multiple_files=True,
                                       help="Multiple Pictures Supported",
                                       key=f"file_uploader_{st.session_state.uploader_key}")
+
     if uploaded_files:
-        
         names = [f.name for f in uploaded_files]
         if st.session_state.get("last_uploaded") != names:
             st.session_state.last_uploaded = names
@@ -359,6 +635,7 @@ if option == "Upload pic/video":
                     for idx, uploaded_file in enumerate(uploaded_files, 1):
                         progress_bar.progress(idx / max(total_files, 1))
                         file_type = uploaded_file.type
+
                         if "image" in file_type:
                             img = np.frombuffer(uploaded_file.read(), np.uint8)
                             img = cv2.imdecode(img, cv2.IMREAD_COLOR)
@@ -371,16 +648,17 @@ if option == "Upload pic/video":
                                 st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Picture", use_column_width=True)
                             with col2:
                                 st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), caption="Result", use_column_width=True)
+
                             if getattr(results, "boxes", None):
                                 for box in results.boxes:
-                                    cls = int(box.cls)
-                                    conf = float(box.conf)
+                                    cls = int(box.cls); conf = float(box.conf)
                                     label = model.names[cls]
                                     waste_type = get_waste_type(label)
                                     all_unique_types.add(waste_type)
                                     all_detections.append((label, conf))
                                     if any(b in label for b in battery_related_classes):
                                         has_battery = True
+
                         elif "video" in file_type:
                             if len(uploaded_files) > 1:
                                 st.error("❌ You could only upload one video at a time")
@@ -461,15 +739,14 @@ if option == "Upload pic/video":
                 except Exception as e:
                     st.error(f"Error: {str(e)}. Please check file format.")
 
-
 elif option == "Use Camera":
     st.subheader("Camera Detection")
     st.info("Click 'Start' to detect")
 
-    
+    # STUN +  TURN
     rtc_config = {
         "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]}
+            {"urls": ["stun:stun.l.google.com:19302", "stun:global.stun.twilio.com:3478?transport=udp"]}
         ]
     }
     turn_url = st.secrets.get("TURN_URL", "")
@@ -489,19 +766,15 @@ elif option == "Use Camera":
         video_processor_factory=VideoProcessor,
         async_processing=True,
         media_stream_constraints={
-            "video": {
-                "width": {"ideal": 640},
-                "height": {"ideal": 480},
-                "frameRate": {"ideal": 15, "max": 15},
-            },
+            "video": {"width": {"ideal": 640}, "height": {"ideal": 480}, "frameRate": {"ideal": 15, "max": 15}},
             "audio": False,
         },
-        video_html_attrs={"style": {"width": "100%"}},
+        video_html_attrs={"autoPlay": True, "playsinline": True},  
     )
 
     
     if ctx.state.playing:
-        st_autorefresh(interval=800, key="cam_result_autorefresh")
+        st_autorefresh(interval=1500, key="cam_result_autorefresh")
 
     if not ctx.state.playing:
         st.session_state.pop("camera_started", None)
@@ -534,4 +807,4 @@ elif option == "Use Camera":
                 else:
                     st.info("No garbage detected")
 
-st.markdown('<div class="footer">© 2025 Garbage Detection System</div>', unsafe_allow_html=True)
+st.markdown('<div class="footer">© 2025 Garbage Detection System | Final Update: 2025-08-12</div>', unsafe_allow_html=True)
