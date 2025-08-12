@@ -84,7 +84,7 @@ def load_users():
     return {}
 
 def save_users(users_dict):
-    with open(USER_DATA_FILE, "wb") as f:
+    with open(USER_DATA_FILE, "wb") as f):
         pickle.dump(users_dict, f)
 
 def get_coordinates(location):
@@ -272,7 +272,7 @@ st.markdown("""
         overflow-x: auto !important;
     }
     .leaderboard-container [data-testid="stHorizontalBlock"] {
-        min-width: 300px !important;
+        min-width: 300px !重要;
     }
 }
 .stAlert {
@@ -340,12 +340,12 @@ st.markdown("""
     flex: 0.5;
 }
 .leaderboard-row:hover {
-    transition: background-color 0.2s ease;
+    transition: background-color: 0.2s ease;
 }
 @media (max-width: 768px) {
     .leaderboard-container {
-        max-width: 100% !important;
-        font-size: 0.9em !important;
+        max-width: 100% !重要;
+        font-size: 0.9em !重要;
     }
     .leaderboard-header, .leaderboard-row {
         padding: 10px 12px;
@@ -657,9 +657,9 @@ if option == "Upload pic/video":
                             st.markdown(f"**File: {uploaded_file.name}**")
                             col1, col2 = st.columns([1, 1])
                             with col1:
-                                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Picture", use_container_width=True)
+                                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Picture", use_column_width=True)
                             with col2:
-                                st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), caption="Result", use_container_width=True)
+                                st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), caption="Result", use_column_width=True)
                             if getattr(results, "boxes", None):
                                 for box in results.boxes:
                                     cls = int(box.cls); conf = float(box.conf)
@@ -821,6 +821,5 @@ elif option == "Use Camera":
                             st.write(f"- {waste_type}: {suggestion}")
                     else:
                         st.info("No garbage detected")
-    
 
 st.markdown('<div class="footer">© 2025 Garbage Detection System | Final Update: 2025-08-12</div>', unsafe_allow_html=True)
