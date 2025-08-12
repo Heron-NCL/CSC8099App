@@ -1,3 +1,9 @@
+import os
+os.environ.setdefault("OPENCV_VIDEOIO_PRIORITY_MSMF", "0")
+os.environ.setdefault("OPENCV_FOR_THREAD_NUMBER", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import streamlit as st
 from ultralytics import YOLO
@@ -6,45 +12,63 @@ import numpy as np
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 import av
 import torch
-from datetime import datetime
 import pickle
-import os
-import folium
-import streamlit.components.v1 as components
 import requests
 from queue import Queue, Empty
-import time
 from math import radians, sin, cos, sqrt, atan2
+from streamlit_autorefresh import st_autorefresh
+import time
+import streamlit.components.v1 as components  # for Google Maps iframe
 
-# -------------------- Model loading --------------------
-@st.cache_resource
+# -------------------- Model loading (ONNX first) --------------------
+@st.cache_resource(show_spinner=True)
 def load_model():
-    # Use a relative path so it works on Streamlit Community Cloud
-    model_path = os.getenv("MODEL_PATH", "best.pt")
+    # 1) allow override via secrets/env
+    model_path = st.secrets.get("MODEL_PATH", os.getenv("MODEL_PATH", "")).strip()
+    # 2) fallback search in repo
+    if not model_path:
+        for p in ["best.onnx", "best.pt", "models/best.onnx", "models/best.pt"]:
+            if os.path.exists(p):
+                model_path = p
+                break
+    if not model_path or not os.path.exists(model_path):
+        st.error("Model file not found. Please upload 'best.onnx' or 'best.pt' to the repo "
+                 "or set secrets MODEL_PATH to its path.")
+        st.stop()
+
     model = YOLO(model_path)
-    if torch.cuda.is_available():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
         model.to("cuda")
-    # Small fusions for speed
+        try:
+            model.model.half()
+        except Exception:
+            pass
     try:
         model.fuse()
     except Exception:
         pass
-    model.eval()
+
+    # warmup: avoid first-frame stall (works with both .onnx and .pt)
+    try:
+        dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+        _ = model.predict(dummy, imgsz=320, conf=0.3, verbose=False)
+    except Exception:
+        pass
     return model
 
 model = load_model()
 
-# -------------------- App Data & Helpers --------------------
+# -------------------- Business data --------------------
 disposal_suggestions = {
     "Dry Waste": "Please place this in the dry waste bin (usually blue or gray).",
     "Recyclable": "Please place this in the recyclable waste bin (usually green).",
     "Hazardous Waste": "Please do not place this in normal waste bin. Handle with care and dispose at a hazardous waste collection point (usually red).",
     "Wet Waste": "Please place this in the wet waste bin (usually brown or compost bin)."
 }
-
 battery_related_classes = ["Powerbank- (Hazardous Waste)", "Battery (Hazardous Waste)"]
 
-def get_waste_type(label):
+def get_waste_type(label: str) -> str:
     if " (" in label and ")" in label:
         return label.split(" (")[1].rstrip(")")
     return "Unknown"
@@ -53,13 +77,16 @@ USER_DATA_FILE = "users.pkl"
 
 def load_users():
     if os.path.exists(USER_DATA_FILE):
-        with open(USER_DATA_FILE, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(USER_DATA_FILE, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            return {}
     return {}
 
-def save_users(users):
+def save_users(users_dict):
     with open(USER_DATA_FILE, "wb") as f:
-        pickle.dump(users, f)
+        pickle.dump(users_dict, f)
 
 def get_coordinates(location):
     url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(location)}&format=json"
@@ -71,53 +98,48 @@ def get_coordinates(location):
                 return float(data[0]['lat']), float(data[0]['lon'])
     except Exception:
         pass
-    return 0, 0  # Default to global if fails
+    return 0, 0
 
 def calculate_distance(lat1, lon1, lat2, lon2):
-    R = 6371.0  # Earth radius in kilometers
+    R = 6371.0
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+    a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    distance = R * c
-    return distance
+    return R * c
 
 def get_nearest_recycling_centers(lat, lon):
-    # NOTE: For production, do NOT hardcode API keys. Use secrets manager / env var.
-    api_key = os.getenv("GOOGLE_MAPS_EMBED_KEY", "")
-    url = f"https://places.googleapis.com/v1/places:searchText"
+    api_key_places = st.secrets.get("GOOGLE_PLACES_API_KEY", "")
+    if not api_key_places:
+        st.info("GOOGLE_PLACES_API_KEY not set in secrets; Places lookup disabled.")
+        return []
+    url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
-        "X-Goog-Api-Key": os.getenv("GOOGLE_PLACES_API_KEY", ""),
+        "X-Goog-Api-Key": api_key_places,
         "X-Goog-FieldMask": "places.displayName,places.location,places.formattedAddress"
     }
     payload = {
         "textQuery": "recycling center",
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lon},
-                "radius": 50000  # 50km
-            }
-        },
+        "locationBias": {"circle": {"center": {"latitude": lat, "longitude": lon}, "radius": 50000}},
         "maxResultCount": 3,
         "rankPreference": "DISTANCE"
     }
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response = requests.post(url, json=payload, headers=headers)
         if response.status_code == 200:
             data = response.json()
-            if "places" in data:
-                centers = []
-                for place in data["places"]:
-                    name = place["displayName"].get("text", "Unknown Name")
-                    place_lat = place["location"]["latitude"]
-                    place_lon = place["location"]["longitude"]
-                    address = place.get("formattedAddress", "Address not available")
-                    dist = calculate_distance(lat, lon, place_lat, place_lon)
-                    centers.append({'name': name, 'lat': place_lat, 'lon': place_lon, 'dist': dist, 'address': address})
-                return centers
-            else:
+            centers = []
+            for place in data.get("places", []):
+                name = place["displayName"].get("text", "Unknown Name")
+                place_lat = place["location"]["latitude"]
+                place_lon = place["location"]["longitude"]
+                address = place.get("formattedAddress", "Address not available")
+                dist = calculate_distance(lat, lon, place_lat, place_lon)
+                centers.append({'name': name, 'lat': place_lat, 'lon': place_lon, 'dist': dist, 'address': address})
+            if not centers:
                 st.info("No places found near your location.")
+            return centers
         else:
             try:
                 msg = response.json().get('error', {}).get('message', 'Unknown')
@@ -132,7 +154,11 @@ def display_battery_recycling_section(key_suffix=""):
     st.warning("Hazardous battery detected! Please recycle properly.")
     with st.container():
         st.markdown('<div class="location-container">', unsafe_allow_html=True)
-        location = st.text_input("Enter your city or zip code for nearest recycling center:", placeholder="e.g., New York, NY or 10001", key=f"location_input_{key_suffix}")
+        location = st.text_input(
+            "Enter your city or zip code for nearest recycling center:",
+            placeholder="e.g., New York, NY or 10001",
+            key=f"location_input_{key_suffix}"
+        )
         if location:
             search_query = f"recycling center near {location}"
             maps_url = f"https://www.google.com/maps/search/?api=1&query={requests.utils.quote(search_query)}"
@@ -148,27 +174,33 @@ def display_battery_recycling_section(key_suffix=""):
                     col_buttons = st.columns(min(3, len(centers)))
                     for idx, center in enumerate(centers):
                         with col_buttons[idx]:
-                            if st.button(f"{center['name']} ({center['dist']:.2f} km) - {center['address']}", key=f"center_button_{idx}_{key_suffix}"):
+                            if st.button(f"{center['name']} ({center['dist']:.2f} km) - {center['address']}",
+                                         key=f"center_button_{idx}_{key_suffix}"):
                                 st.session_state[f"selected_center_{key_suffix}"] = center
 
-                    embed_key = os.getenv("GOOGLE_MAPS_EMBED_KEY", "")
+                    embed_key = st.secrets.get("GOOGLE_MAPS_EMBED_KEY", "")
                     if f"selected_center_{key_suffix}" in st.session_state:
                         selected = st.session_state[f"selected_center_{key_suffix}"]
                         selected_query = f"{selected['name']} {selected['address']}"
-                        embed_src = f"https://www.google.com/maps/embed/v1/place?key={embed_key}&q={requests.utils.quote(selected_query)}&center={selected['lat']},{selected['lon']}&zoom=15"
+                        embed_src = (
+                            f"https://www.google.com/maps/embed/v1/place?key={embed_key}"
+                            f"&q={requests.utils.quote(selected_query)}&center={selected['lat']},{selected['lon']}&zoom=15"
+                        )
                     else:
-                        embed_src = f"https://www.google.com/maps/embed/v1/search?key={embed_key}&q={requests.utils.quote(search_query)}&center={lat},{lon}&zoom=10"
-
+                        embed_src = (
+                            f"https://www.google.com/maps/embed/v1/search?key={embed_key}"
+                            f"&q={requests.utils.quote(search_query)}&center={lat},{lon}&zoom=10"
+                        )
                     components.html(
-                        f'<iframe width="700" height="500" frameborder="0" style="border:0" referrerpolicy="no-referrer-when-downgrade" src="{embed_src}" allowfullscreen></iframe>',
-                        width=700,
-                        height=500
+                        f'<iframe width="700" height="500" frameborder="0" style="border:0" '
+                        f'referrerpolicy="no-referrer-when-downgrade" src="{embed_src}" allowfullscreen></iframe>',
+                        width=700, height=500
                     )
                 else:
                     st.info("No nearby recycling centers found. Try the Google Maps link above.")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------- Styles --------------------
+
 st.markdown("""
 <style>
 .footer { text-align:center; padding:10px; }
@@ -176,26 +208,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------- UI --------------------
+
 st.title("Garbage Detection System :wastebasket:")
 st.markdown("**No Login Required, Free Access!** Choose a function to classify garbage. Max file size: 50MB.")
 
 users = load_users()
-
 if "user" not in st.session_state:
     st.session_state.user = None
     st.session_state.points = 0
-
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
-
 if "current_detections" not in st.session_state:
     st.session_state.current_detections = []
-
 if "selected_option" not in st.session_state:
     st.session_state.selected_option = "Upload pic/video"
+if "points_added" not in st.session_state:
+    st.session_state.points_added = False
 
-# (Optional) Login UI preserved
+
 if not st.session_state.user:
     with st.container():
         col_login1, col_login2 = st.columns(2)
@@ -210,7 +240,7 @@ if not st.session_state.user:
                         st.session_state.user = username
                         st.session_state.points = users[username]["points"]
                         st.success(f"Welcome back, {username}!")
-                        st.experimental_rerun()
+                        st.rerun()
                     else:
                         st.error("Incorrect password.")
                 else:
@@ -219,7 +249,7 @@ if not st.session_state.user:
                     st.session_state.user = username
                     st.session_state.points = 0
                     st.success(f"Registered and logged in as {username}!")
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 st.error("Please provide username and password.")
 else:
@@ -227,16 +257,17 @@ else:
     if st.button("Logout"):
         st.session_state.clear()
         st.success("Logged out.")
-        st.experimental_rerun()
-    # Leaderboard
+        st.rerun()
+    
     with st.container():
         sorted_users = sorted(users.items(), key=lambda x: x[1]['points'], reverse=True)[:10]
         st.write("Leaderboard (Top 10):")
         for rank, (user, data) in enumerate(sorted_users, 1):
             st.write(f"{rank}. {user} - {data['points']}")
 
-option = st.sidebar.radio("Function", ("Upload pic/video", "Use Camera"), format_func=lambda x: f"🌟 {x}", key="selected_option")
 
+option = st.sidebar.radio("Function", ("Upload pic/video", "Use Camera"),
+                          format_func=lambda x: f"🌟 {x}", key="selected_option")
 results_container = st.expander("📋 Result:", expanded=True)
 
 def is_battery_related(detections):
@@ -245,10 +276,10 @@ def is_battery_related(detections):
             return True
     return False
 
-# -------------------- Real-time Video Processor --------------------
+
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.detections_queue = Queue(maxsize=1)  # latest-only
+        self.detections_queue = Queue(maxsize=1)  # latest-only, avoid backlog
         self._last_annotated = None
         self._frame_idx = 0
         self._last_infer_ts = 0.0
@@ -257,7 +288,7 @@ class VideoProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         self._frame_idx += 1
 
-        # Throttle: every 2 frames + <= ~8 infers/sec
+        
         do_infer = (self._frame_idx % 2 == 0)
         now = time.time()
         if now - self._last_infer_ts < 0.12:
@@ -267,13 +298,14 @@ class VideoProcessor(VideoProcessorBase):
             try:
                 self._last_infer_ts = now
                 with torch.no_grad():
-                    results = model(img, imgsz=320, conf=0.35)[0]
+                    results = model(img, imgsz=320, conf=0.35, verbose=False)[0]
                 annotated = results.plot()
 
                 uniq = set()
-                for box in results.boxes:
+                for box in getattr(results, "boxes", []):
                     lbl = model.names[int(box.cls)]
                     uniq.add(lbl)
+                    
                     try:
                         x1, y1, x2, y2 = map(int, box.xyxy[0])
                         waste_type = get_waste_type(lbl)
@@ -287,15 +319,19 @@ class VideoProcessor(VideoProcessorBase):
                 try:
                     self.detections_queue.put_nowait(sorted(list(uniq)))
                 except Exception:
-                    pass
+                    
+                    try:
+                        _ = self.detections_queue.get_nowait()
+                        self.detections_queue.put_nowait(sorted(list(uniq)))
+                    except Exception:
+                        pass
             except Exception:
-                # In case of error, keep last frame to avoid breaking stream
-                self._last_annotated = img
+                self._last_annotated = img  
 
         out = self._last_annotated if self._last_annotated is not None else img
         return av.VideoFrame.from_ndarray(out, format="bgr24")
 
-# -------------------- Upload flow --------------------
+
 if option == "Upload pic/video":
     st.subheader("📤 Upload your file here")
     uploaded_files = st.file_uploader("Select Pics (Maximum 10 pics) or Video",
@@ -304,10 +340,11 @@ if option == "Upload pic/video":
                                       help="Multiple Pictures Supported",
                                       key=f"file_uploader_{st.session_state.uploader_key}")
     if uploaded_files:
+        
         names = [f.name for f in uploaded_files]
-        if "last_uploaded" not in st.session_state or st.session_state.last_uploaded != names:
-            st.session_state.pop("points_added", None)
+        if st.session_state.get("last_uploaded") != names:
             st.session_state.last_uploaded = names
+            st.session_state.points_added = False
 
         if len(uploaded_files) > 10:
             st.error("❌ Maximum 10 pics")
@@ -320,13 +357,13 @@ if option == "Upload pic/video":
             with st.spinner("🔄 Processing..."):
                 try:
                     for idx, uploaded_file in enumerate(uploaded_files, 1):
-                        progress_bar.progress(idx / total_files)
+                        progress_bar.progress(idx / max(total_files, 1))
                         file_type = uploaded_file.type
                         if "image" in file_type:
                             img = np.frombuffer(uploaded_file.read(), np.uint8)
                             img = cv2.imdecode(img, cv2.IMREAD_COLOR)
                             with torch.no_grad():
-                                results = model(img, imgsz=320, conf=0.35)[0]
+                                results = model(img, imgsz=320, conf=0.35, verbose=False)[0]
                             annotated_img = results.plot()
                             st.markdown(f"**File: {uploaded_file.name}**")
                             col1, col2 = st.columns([1, 1])
@@ -334,7 +371,7 @@ if option == "Upload pic/video":
                                 st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Picture", use_column_width=True)
                             with col2:
                                 st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), caption="Result", use_column_width=True)
-                            if results.boxes:
+                            if getattr(results, "boxes", None):
                                 for box in results.boxes:
                                     cls = int(box.cls)
                                     conf = float(box.conf)
@@ -354,17 +391,17 @@ if option == "Upload pic/video":
                             cap = cv2.VideoCapture(temp_path)
                             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                             fps = cap.get(cv2.CAP_PROP_FPS) or 25
-                            st.write(f"Video Length: {frame_count / max(fps,1):.2f} secs")
+                            st.write(f"Video Length: {frame_count / max(fps, 1):.2f} secs")
                             detections = []
                             unique_types = set()
                             step = max(1, frame_count // 10)
                             for i in range(0, min(frame_count, 10 * step), step):
                                 cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                                ret, frame = cap.read()
+                                ret, frame_img = cap.read()
                                 if ret:
                                     with torch.no_grad():
-                                        results = model(frame, imgsz=320, conf=0.35)[0]
-                                    if results.boxes:
+                                        results = model(frame_img, imgsz=320, conf=0.35, verbose=False)[0]
+                                    if getattr(results, "boxes", None):
                                         for box in results.boxes:
                                             cls = int(box.cls)
                                             label = model.names[cls]
@@ -377,38 +414,44 @@ if option == "Upload pic/video":
                             st.video(temp_path)
                             with results_container:
                                 if detections:
-                                    unique_detections = set(detections)
+                                    unique_detections = sorted(set(detections))
                                     st.markdown('<span class="big-title">Garbage in the video:</span>', unsafe_allow_html=True)
                                     for det in unique_detections:
                                         st.write(f"- {det}")
                                     st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                                    for waste_type in unique_types:
+                                    for waste_type in sorted(unique_types):
                                         suggestion = disposal_suggestions.get(waste_type, "Unknown")
                                         st.write(f"- {waste_type}: {suggestion}")
                                     if has_battery:
                                         display_battery_recycling_section(key_suffix="video")
-                                    if st.session_state.user and "points_added" not in st.session_state:
-                                        st.session_state.points_added = True
-                                        added_points = len(unique_detections)
-                                        users[st.session_state.user]["points"] += added_points
-                                        st.session_state.points = users[st.session_state.user]["points"]
-                                        save_users(users)
-                                        st.success(f"Points updated! You now have {st.session_state.points} points.")
                                 else:
                                     st.info("No garbage detected")
-                    if st.session_state.user and all_detections and "points_added" not in st.session_state:
-                        st.session_state.points_added = True
-                        users[st.session_state.user]["points"] += len(all_detections)
-                        st.session_state.points = users[st.session_state.user]["points"]
+                            
+                            if st.session_state.user and detections and not st.session_state.get("points_added", False):
+                                users[st.session_state.user]["points"] = users.get(st.session_state.user, {"points": 0}).get("points", 0) + len(set(detections))
+                                save_users(users)
+                                st.session_state.points = users[st.session_state.user]["points"]
+                                st.session_state.points_added = True
+                                st.success(f"Points updated! You now have {st.session_state.points} points.")
+                                st.rerun()
+                            continue
+
+                    
+                    if st.session_state.user and all_detections and not st.session_state.get("points_added", False):
+                        users[st.session_state.user]["points"] = users.get(st.session_state.user, {"points": 0}).get("points", 0) + len(all_detections)
                         save_users(users)
+                        st.session_state.points = users[st.session_state.user]["points"]
+                        st.session_state.points_added = True
                         st.success(f"Points updated! You now have {st.session_state.points} points.")
+                        st.rerun()
+
                     with results_container:
                         if all_detections:
                             st.markdown('<span class="big-title">Garbage in all images:</span>', unsafe_allow_html=True)
                             for label, conf in all_detections:
                                 st.write(f"- {label} (Confidence: {conf:.2f})")
                             st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                            for waste_type in all_unique_types:
+                            for waste_type in sorted(all_unique_types):
                                 suggestion = disposal_suggestions.get(waste_type, "Unknown")
                                 st.write(f"- {waste_type}: {suggestion}")
                             if has_battery or is_battery_related(all_detections):
@@ -418,19 +461,26 @@ if option == "Upload pic/video":
                 except Exception as e:
                     st.error(f"Error: {str(e)}. Please check file format.")
 
-# -------------------- Camera flow --------------------
+
 elif option == "Use Camera":
     st.subheader("Camera Detection")
     st.info("Click 'Start' to detect")
 
-    # ICE servers: Google STUN + hook for your TURN
+    
     rtc_config = {
         "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            # Uncomment and set your TURN if you are behind restricted networks:
-            # {"urls": ["turn:turn.yourdomain.com:3478"], "username": "user", "credential": "pass"}
+            {"urls": ["stun:stun.l.google.com:19302"]}
         ]
     }
+    turn_url = st.secrets.get("TURN_URL", "")
+    turn_user = st.secrets.get("TURN_USERNAME", "")
+    turn_cred = st.secrets.get("TURN_CREDENTIAL", "")
+    if turn_url and turn_user and turn_cred:
+        rtc_config["iceServers"].append({
+            "urls": [turn_url],
+            "username": turn_user,
+            "credential": turn_cred
+        })
 
     ctx = webrtc_streamer(
         key="webcam",
@@ -449,42 +499,39 @@ elif option == "Use Camera":
         video_html_attrs={"style": {"width": "100%"}},
     )
 
-    status_placeholder = st.empty()
+    
+    if ctx.state.playing:
+        st_autorefresh(interval=800, key="cam_result_autorefresh")
+
     if not ctx.state.playing:
         st.session_state.pop("camera_started", None)
-        st.session_state.pop("points_added", None)
         st.session_state.current_detections = []
-        status_placeholder.warning("🟡 Click Start to enable camera")
     else:
-        status_placeholder.info("🔴 Camera connected, running inference...")
         if "camera_started" not in st.session_state:
             st.session_state.camera_started = True
         if ctx.video_processor:
+            
+            latest = None
             try:
-                unique_detections = ctx.video_processor.detections_queue.get(timeout=0.1)
-                st.session_state.current_detections = unique_detections
+                while True:
+                    latest = ctx.video_processor.detections_queue.get_nowait()
             except Empty:
-                unique_detections = st.session_state.current_detections
+                pass
+            if latest is not None:
+                st.session_state.current_detections = latest
+
             with results_container:
+                unique_detections = st.session_state.get("current_detections", [])
                 if unique_detections:
                     st.markdown('<span class="big-title">Detected Garbage:</span>', unsafe_allow_html=True)
-                    for det in sorted(unique_detections):
+                    for det in unique_detections:
                         st.write(f"- {det}")
-                    unique_types = set(get_waste_type(det) for det in unique_detections)
+                    unique_types = sorted(set(get_waste_type(det) for det in unique_detections))
                     st.markdown('<span class="big-title">Disposal Advices:</span>', unsafe_allow_html=True)
-                    for waste_type in sorted(unique_types):
+                    for waste_type in unique_types:
                         suggestion = disposal_suggestions.get(waste_type, "Unknown")
                         st.write(f"- {waste_type}: {suggestion}")
-                    has_battery = any(any(b in det for b in battery_related_classes) for det in unique_detections)
-                    if has_battery:
-                        display_battery_recycling_section(key_suffix="camera")
                 else:
                     st.info("No garbage detected")
-            if st.session_state.user and unique_detections and "points_added" not in st.session_state:
-                st.session_state.points_added = True
-                users[st.session_state.user]["points"] += len(unique_detections)
-                st.session_state.points = users[st.session_state.user]["points"]
-                save_users(users)
-                st.success(f"Points updated! You now have {st.session_state.points} points.")
 
 st.markdown('<div class="footer">© 2025 Garbage Detection System</div>', unsafe_allow_html=True)
